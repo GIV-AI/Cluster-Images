@@ -22,6 +22,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import json
 import humanize
+import urllib.parse
 
 # Import the API modules
 from .image_api import parse_crictl_images_output, load_ignored_image_ids
@@ -131,6 +132,45 @@ def load_config(defaults, filepath):
     return config
 
 
+def encode_repository_name(full_repo_name, project_name):
+    """
+    Encode repository name for Harbor API URL.
+    
+    For proxy cache repositories, Harbor requires double URL encoding (%252F instead of %2F).
+    This function handles both regular and proxy cache repositories.
+    
+    Args:
+        full_repo_name: Full repository name (e.g., 'nvcr.io/nvidia/pytorch' or 'custom/my-image')
+        project_name: Project name (e.g., 'nvcr.io' or 'custom')
+    
+    Returns:
+        Encoded repository name suitable for Harbor API URLs
+    
+    Example:
+        >>> encode_repository_name('nvcr.io/nvidia/pytorch', 'nvcr.io')
+        'nvidia%252Fpytorch'
+        >>> encode_repository_name('custom/my-image', 'custom')
+        'my-image'
+    """
+    logger = logging.getLogger(__name__)
+    
+    # Remove project prefix from repository name
+    if full_repo_name.startswith(f"{project_name}/"):
+        repo_path = full_repo_name[len(project_name) + 1:]
+    else:
+        # Fallback: take everything after the first slash
+        parts = full_repo_name.split('/', 1)
+        repo_path = parts[1] if len(parts) > 1 else full_repo_name
+    
+    # Apply double URL encoding for slashes to handle proxy cache repositories
+    # Regular projects will also work with this encoding
+    encoded_name = repo_path.replace('/', '%252F')
+    
+    logger.debug(f"Encoded '{full_repo_name}' (project: '{project_name}') -> '{encoded_name}'")
+    return encoded_name
+
+
+
 # --- Application Initialization ---
 # This setup code is now at the global scope, so it will be executed when
 # Gunicorn imports this file. This resolves the KeyError.
@@ -210,17 +250,32 @@ def get_all_images():
                 )
 
                 for repo in repositories:
-                    repo_name = repo['name'] # only consider after the last /
-                    repo_name = repo_name.split('/')[-1]
-                    logger.info(f"Getting artifacts for {repo_name}")
-                    artifacts_url = f"{harbor_cfg['url'].rstrip('/')}/api/v2.0/projects/{project_name}/repositories/{repo_name}/artifacts"
-                    artifacts = get_harbor_paginated_results(
-                        artifacts_url,
-                        auth,
-                        verify_ssl=harbor_cfg['verify_ssl']
-                    )
+                    full_repo_name = repo['name']
+                    
+                    # Encode the repository name properly for the API URL
+                    # This handles both regular and proxy cache repositories
+                    encoded_repo_name = encode_repository_name(full_repo_name, project_name)
+                    
+                    logger.info(f"Getting artifacts for repository: {full_repo_name} (encoded: {encoded_repo_name})")
+                    
+                    artifacts_url = f"{harbor_cfg['url'].rstrip('/')}/api/v2.0/projects/{project_name}/repositories/{encoded_repo_name}/artifacts"
+                    
+                    try:
+                        artifacts = get_harbor_paginated_results(
+                            artifacts_url,
+                            auth,
+                            verify_ssl=harbor_cfg['verify_ssl']
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to get artifacts for {full_repo_name}: {str(e)}")
+                        result["errors"].append({
+                            "source": "harbor",
+                            "repository": full_repo_name,
+                            "error": f"Failed to fetch artifacts: {str(e)}"
+                        })
+                        continue
 
-                    #convert artifact size to human readable format from bytes to MB or GB
+                    # Convert artifact size to human readable format from bytes to MB or GB
                     for artifact in artifacts:
                         artifact['size'] = humanize.naturalsize(artifact['size'])
 
@@ -228,7 +283,7 @@ def get_all_images():
                         if 'tags' in artifact and artifact['tags']:
                             for tag in artifact['tags']:
                                 harbor_images.append({
-                                    "repository": repo_name,
+                                    "repository": full_repo_name,  # Use full name for display
                                     "tag": tag['name'],
                                     "digest": artifact['digest'],
                                     "size": artifact.get('size', 'unknown'),
