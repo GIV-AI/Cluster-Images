@@ -1,6 +1,6 @@
 # imgctl Client
 
-`imgctl` is a command-line interface (CLI) for interacting with the Image Service Backend. It allows you to view container images from both the local containerd runtime and a remote Harbor registry.
+`imgctl` is a command-line interface (CLI) for interacting with the Image Service Backend. It allows you to view container images from both the local containerd runtime and a remote Harbor registry. `imgctl` client will be installed on the head node of the BCM cluster.
 
 ## Dependencies
 
